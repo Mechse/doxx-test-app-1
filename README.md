@@ -2,7 +2,7 @@
 
 A small Hono/Node notes app on EC2, with PostgreSQL on RDS. The EC2 security group has **zero inbound rules**. An outbound WireGuard tunnel carries requests from a selected Mac on doxx.net.
 
-**Status: numbered Step 1 implemented locally. No cloud resources have been provisioned, no live tests have run, and no benchmark baseline exists.** HTTPS and login are separate later stages in [the plan](plans/doxx-aws-test-app.md). This version serves HTTP inside the tunnel and is for disposable test notes.
+**Status: numbered Step 1 implemented locally. No cloud resources have been provisioned, no live tests have run, and no benchmark baseline exists.** HTTPS and login are separate later stages in [the plan](plans/doxx-test-app-1.md). This version serves HTTP inside the tunnel and is for disposable test notes.
 
 ## Contents
 
@@ -263,7 +263,7 @@ Use a net-admin token for mutations. References: [authentication](https://github
 | Instance unavailable | Wait for RDS and cloud-init, then use `aws ssm start-session --target <instance-id>` |
 | Tunnel down | Privately inspect `sudo wg show` and `journalctl -u wg-quick@doxx`; never publish config output |
 | Service unavailable | `journalctl -u doxx-app`; check DB connectivity, CA and secret permissions |
-| 403 from app | Mac tunnel changed, source address differs, or CSRF token is stale after restart |
+| 403 from app | Mac tunnel changed, source address differs, or CSRF token is stale after restart (reload the page). Form POSTs must be same-origin: the app sends `Referrer-Policy: same-origin` because `no-referrer` makes browsers send `Origin: null`, which the app rejects |
 | Large responses stall | Revisit MTU and routes; 1380 is provisional |
 | RDS version unavailable | Select a supported exact version in `terraform.tfvars`, document the change |
 | Boot package install fails | Check pinned AMI and AL2023 nodejs22 package availability |

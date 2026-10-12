@@ -9,6 +9,8 @@ const value = (key) => out[key].value;
 process.env.AWS_REGION = value('aws_region');
 const url = value('app_url');
 const request = (path, options = {}) => fetch(url + path, { redirect: 'manual', signal: AbortSignal.timeout(10000), ...options });
+// Browsers send Origin on form POSTs; send it too so the app's same-origin check is exercised.
+const origin = { Origin: new URL(url).origin };
 if (process.argv.includes('--offline')) {
   let failed = false;
   try { await request('/healthz'); } catch { failed = true; }
@@ -35,7 +37,7 @@ if (process.argv.includes('--offline')) {
   assert.ok(html.includes(value('client_ip')), 'Page must report the Mac tunnel IP');
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1]; assert.ok(csrf);
   const note = `verification-${randomUUID()}`;
-  const post = await request('/notes', { method: 'POST', body: new URLSearchParams({ csrf, text: note }) });
+  const post = await request('/notes', { method: 'POST', headers: origin, body: new URLSearchParams({ csrf, text: note }) });
   assert.equal(post.status, 303);
   const id = post.headers.get('x-note-id'); assert.match(id, /^\d+$/);
   try {
@@ -58,7 +60,7 @@ if (process.argv.includes('--offline')) {
   } finally {
     const fresh = await (await request('/')).text();
     const freshToken = fresh.match(/name="csrf" value="([^"]+)"/)?.[1];
-    assert.equal((await request(`/notes/${id}/delete`, { method: 'POST', body: new URLSearchParams({ csrf: freshToken }) })).status, 204);
+    assert.equal((await request(`/notes/${id}/delete`, { method: 'POST', headers: origin, body: new URLSearchParams({ csrf: freshToken }) })).status, 204);
   }
   let blocked = false;
   try { await fetch(`http://${value('public_ip')}:8080/healthz`, { signal: AbortSignal.timeout(5000) }); } catch { blocked = true; }

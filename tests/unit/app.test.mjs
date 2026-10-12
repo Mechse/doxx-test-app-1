@@ -22,10 +22,15 @@ test('rejects other peers even with a forged forwarded address', async () => {
 });
 test('notes require valid form token and same-origin browser requests', async () => {
   const { app, calls } = fixture();
-  const html = await (await app.request('/')).text();
+  const page = await app.request('/');
+  // Browsers send "Origin: null" on form POSTs under no-referrer, which this app rejects.
+  assert.equal(page.headers.get('referrer-policy'), 'same-origin');
+  const html = await page.text();
   const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
   assert.equal((await formRequest(app, '', 'bad')).status, 403);
   assert.equal((await formRequest(app, csrf, 'bad', { origin: 'https://attacker.example' })).status, 403);
+  assert.equal((await formRequest(app, csrf, 'bad', { origin: 'null' })).status, 403);
+  assert.equal((await formRequest(app, csrf, 'browser', { origin: 'http://10.1.0.2:8080' })).status, 303);
   assert.equal((await formRequest(app, csrf, ' ')).status, 400);
   assert.equal((await formRequest(app, csrf, 'a'.repeat(2001))).status, 400);
   const response = await formRequest(app, csrf, "'; DROP TABLE notes; --");

@@ -16,7 +16,8 @@ export function createApp({ pool, bindHost, clientIp, remoteAddress = (c) => get
     c.set('dbMs', 0);
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
-    c.header('Referrer-Policy', 'no-referrer');
+    // no-referrer would make browsers send "Origin: null" on the form POST and fail validateForm.
+    c.header('Referrer-Policy', 'same-origin');
     c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     if (normalize(remoteAddress(c)) !== clientIp) {
       c.header('Server-Timing', `app;dur=${(performance.now() - start).toFixed(3)}, db;dur=0`);

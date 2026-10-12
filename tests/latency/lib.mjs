@@ -25,7 +25,7 @@ export function request(url, { agent = false, method = 'GET', body } = {}) {
   return new Promise((resolve, reject) => {
     const start = performance.now();
     const encoded = body ? new URLSearchParams(body).toString() : undefined;
-    const req = http.request(url, { agent, method, headers: encoded ? { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(encoded) } : {} }, (res) => {
+    const req = http.request(url, { agent, method, headers: encoded ? { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(encoded), Origin: new URL(url).origin } : {} }, (res) => {
       let text = '';
       res.setEncoding('utf8');
       res.on('data', (part) => { text += part; });
