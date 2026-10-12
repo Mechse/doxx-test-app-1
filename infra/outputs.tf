@@ -1,0 +1,10 @@
+output "instance_id" { value = aws_instance.app.id }
+output "public_ip" { value = aws_instance.app.public_ip }
+output "tunnel_ip" { value = var.tunnel_ip }
+output "client_ip" { value = var.client_ip }
+output "app_url" { value = "http://${var.tunnel_ip}:8080" }
+output "ami_id" { value = aws_instance.app.ami }
+output "app_security_group_id" { value = aws_security_group.app.id }
+output "db_security_group_id" { value = aws_security_group.db.id }
+output "db_identifier" { value = aws_db_instance.notes.identifier }
+output "aws_region" { value = var.aws_region }

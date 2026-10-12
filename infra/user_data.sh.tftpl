@@ -1,0 +1,83 @@
+#!/bin/bash
+set +x
+set -euo pipefail
+umask 077
+dnf install -y wireguard-tools nodejs22 nodejs22-npm
+id notes >/dev/null 2>&1 || useradd --system --home-dir /opt/doxx-app --shell /sbin/nologin notes
+install -d -m 0755 /opt/doxx-app
+install -d -m 0700 /etc/wireguard
+cat > /opt/doxx-app/app.tar.gz.b64 <<'BUNDLE'
+${app_bundle}
+BUNDLE
+base64 --decode /opt/doxx-app/app.tar.gz.b64 | tar -xz -C /opt/doxx-app
+rm /opt/doxx-app/app.tar.gz.b64
+cd /opt/doxx-app
+# AL2023 versioned Node packages expose node-22/npm-22.
+ln -sf /usr/bin/node-22 /usr/local/bin/node
+PATH=/usr/local/bin:/usr/bin:/bin npm-22 ci --omit=dev --ignore-scripts --no-audit --no-fund
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /opt/doxx-app/rds-ca.pem
+chmod -R a+rX /opt/doxx-app
+cat > /usr/local/sbin/doxx-fetch-wg <<'FETCH'
+#!/bin/bash
+set +x
+set -euo pipefail
+umask 077
+tmp=$(mktemp /etc/wireguard/.doxx.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+aws ssm get-parameter --name '${parameter}' --with-decryption --region '${region}' --query Parameter.Value --output text > "$tmp"
+test -s "$tmp"
+chmod 0600 "$tmp"
+mv "$tmp" /etc/wireguard/doxx.conf
+FETCH
+chmod 0700 /usr/local/sbin/doxx-fetch-wg
+cat > /etc/systemd/system/doxx-config.service <<'UNIT'
+[Unit]
+Description=Fetch private doxx WireGuard configuration
+Wants=network-online.target
+After=network-online.target
+Before=wg-quick@doxx.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/doxx-fetch-wg
+RemainAfterExit=yes
+UNIT
+mkdir -p /etc/systemd/system/wg-quick@doxx.service.d
+cat > /etc/systemd/system/wg-quick@doxx.service.d/config.conf <<'UNIT'
+[Unit]
+Requires=doxx-config.service
+After=doxx-config.service
+UNIT
+cat > /etc/doxx-app.env <<'ENV'
+BIND_HOST=${tunnel_ip}
+CLIENT_IP=${client_ip}
+AWS_REGION=${region}
+DB_HOST=${db_host}
+DB_SECRET_ARN=${secret_arn}
+DB_CA_FILE=/opt/doxx-app/rds-ca.pem
+ENV
+chmod 0600 /etc/doxx-app.env
+cat > /etc/systemd/system/doxx-app.service <<'UNIT'
+[Unit]
+Description=doxx private notes demo
+Requires=wg-quick@doxx.service
+After=network-online.target wg-quick@doxx.service
+[Service]
+User=notes
+Group=notes
+WorkingDirectory=/opt/doxx-app
+EnvironmentFile=/etc/doxx-app.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node-22 /opt/doxx-app/server.js
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictSUIDSGID=yes
+UMask=0077
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now wg-quick@doxx.service doxx-app.service

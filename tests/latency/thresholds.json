@@ -1,0 +1,15 @@
+{
+  "samples": 200,
+  "warmup": 10,
+  "overlayMs": 30,
+  "jitterMs": 20,
+  "warmExtraMs": 15,
+  "coldExtraMs": 20,
+  "appMs": 5,
+  "dbReadMs": 10,
+  "dbWriteMs": 20,
+  "loadMultiplier": 2,
+  "concurrency": 10,
+  "loadSeconds": 30,
+  "idleSeconds": 90
+}
