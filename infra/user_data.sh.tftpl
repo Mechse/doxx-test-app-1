@@ -2,7 +2,7 @@
 set +x
 set -euo pipefail
 umask 077
-dnf install -y wireguard-tools nodejs22 nodejs22-npm
+dnf install -y wireguard-tools nodejs22 nodejs22-npm iptables
 id notes >/dev/null 2>&1 || useradd --system --home-dir /opt/doxx-app --shell /sbin/nologin notes
 install -d -m 0755 /opt/doxx-app
 install -d -m 0700 /etc/wireguard
@@ -17,6 +17,15 @@ ln -sf /usr/bin/node-22 /usr/local/bin/node
 PATH=/usr/local/bin:/usr/bin:/bin npm-22 ci --omit=dev --ignore-scripts --no-audit --no-fund
 curl --fail --silent --show-error --proto '=https' --tlsv1.2 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /opt/doxx-app/rds-ca.pem
 chmod -R a+rX /opt/doxx-app
+chown -R root:root /opt/doxx-app
+cat > /usr/local/sbin/doxx-isolate-notes <<'ISOLATE'
+#!/bin/bash
+set -euo pipefail
+# IMDSv2 tokens are available to local processes; deny this UID access entirely.
+iptables -C OUTPUT -d 169.254.169.254/32 -m owner --uid-owner notes -j REJECT 2>/dev/null || \
+  iptables -I OUTPUT 1 -d 169.254.169.254/32 -m owner --uid-owner notes -j REJECT
+ISOLATE
+chmod 0700 /usr/local/sbin/doxx-isolate-notes
 cat > /usr/local/sbin/doxx-fetch-wg <<'FETCH'
 #!/bin/bash
 set +x
@@ -53,6 +62,7 @@ CLIENT_IP=${client_ip}
 AWS_REGION=${region}
 DB_HOST=${db_host}
 DB_SECRET_ARN=${secret_arn}
+DB_CREDENTIALS_FILE=/run/doxx-app/db-credentials.json
 DB_CA_FILE=/opt/doxx-app/rds-ca.pem
 ENV
 chmod 0600 /etc/doxx-app.env
@@ -66,8 +76,10 @@ User=notes
 Group=notes
 WorkingDirectory=/opt/doxx-app
 EnvironmentFile=/etc/doxx-app.env
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/node-22 /opt/doxx-app/server.js
+ExecStartPre=+/usr/local/sbin/doxx-isolate-notes
+ExecStartPre=+/usr/bin/node-22 /opt/doxx-app/bootstrap.js
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=yes
@@ -76,6 +88,7 @@ ProtectSystem=strict
 ProtectHome=yes
 RestrictSUIDSGID=yes
 UMask=0077
+CapabilityBoundingSet=
 [Install]
 WantedBy=multi-user.target
 UNIT

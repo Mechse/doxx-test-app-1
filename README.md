@@ -2,7 +2,7 @@
 
 A small Hono/Node notes app on EC2, with PostgreSQL on RDS. The EC2 security group has **zero inbound rules**. An outbound WireGuard tunnel carries requests from a selected Mac on doxx.net.
 
-**Status: numbered Step 1 implemented locally. No cloud resources have been provisioned, no live tests have run, and no benchmark baseline exists.** HTTPS and login are separate later stages in [the plan](plans/doxx-test-app-1.md). This version serves HTTP inside the tunnel and is for disposable test notes.
+**Status: Step 1 deployed on AWS and online verification passed on 2026-10-14. Offline verification, a clean rebuild after the startup fixes, and a benchmark baseline remain pending.** HTTPS and login are separate later stages in [the plan](plans/doxx-test-app-1.md). This version serves HTTP inside the tunnel and is for disposable test notes.
 
 ## Contents
 
@@ -27,7 +27,9 @@ flowchart LR
   E --- A
 ```
 
-Only the configured Mac source IP is accepted by the app, even if the account already has Link All enabled. Changing Mac tunnels requires rerunning provisioning and deployment. There is no application login yet. HTTP is carried by the doxx network; this is not independent browser-to-app TLS. RDS traffic uses TLS with certificate verification.
+The app accepts only the configured Mac source IP and the exact Host header `<tunnel-ip>:8080`. Form Origins are checked against that fixed HTTP origin, which blocks DNS rebinding from a browser on the allowed Mac. Changing Mac tunnels requires rerunning provisioning and deployment. There is no application login yet. HTTP is carried by the doxx network; RDS traffic uses TLS with certificate verification.
+
+Provisioning refuses Link All. It must remain disabled while this instance runs: Link All also lets the EC2 tunnel initiate connections to every other device on the account, on every port. Use the dedicated Mac-to-app TCP 8080 rule. A disabled rule owned by this project is recreated as active. An unowned matching disabled rule causes a clear error; enable or remove it yourself before retrying so provisioning preserves unowned rules.
 
 ```mermaid
 sequenceDiagram
@@ -39,9 +41,11 @@ sequenceDiagram
   participant R as RDS
   E->>S: Fetch SecureString using instance role
   E->>W: Install private config and start tunnel
-  E->>A: Start unprivileged service after tunnel
-  A->>M: Read managed DB credential
-  A->>R: Verify TLS and initialize notes table
+  E->>E: Block notes UID from instance metadata
+  E->>M: Root reads managed master DB credential
+  E->>R: Verify TLS, initialize table and scoped app role
+  E->>A: Start notes service with scoped credentials from /run
+  A->>R: TLS connection as notes_app
 ```
 
 ## Prerequisites
@@ -54,10 +58,12 @@ sequenceDiagram
 | WireGuard on the Mac | `wg --version`; create and connect a separate Mac tunnel |
 | curl, jq, tar, Bash | `make check` checks availability |
 | doxx account and available tunnel seat | [Account portal](https://a0x13.doxx.net/); signup and subscription/trial are manual |
-| doxx net-admin token | Create in the portal; place only in private `.env` or environment |
+| doxx net-admin token | Dedicated expiring token with an IP fence; place only in private `.env` or environment |
 | Default VPC in us-east-1 | Must use `172.31.0.0/16`, public outbound routing, and subnets in at least two availability zones |
 
 No application Docker build is needed. AWS boot installs the versioned `nodejs22` packages; see [Amazon Linux's Node documentation](https://docs.aws.amazon.com/linux/al2023/ug/nodejs.html).
+
+Use a dedicated `net-admin` token with a short expiration and an IP fence for the address from which you call the API. For a pre-existing app tunnel, scope the token to that tunnel and the selected Mac. New tunnel creation may need an initially broader provisioning token; an account admin can add the new tunnel scope afterward. Revoke the provisioning token after provisioning. Use a scoped read-only token for live verification, and issue a fresh short-lived net-admin token for reprovisioning or teardown. Token creation, fencing, scoping and revocation are documented in the [doxx token reference](https://github.com/doxxcorp/config.doxx.net/blob/main/docs/endpoints/tokens.md).
 
 ## Build it
 
@@ -73,17 +79,17 @@ make test-infra
 make security-check
 ```
 
-The application and provider versions are locked in `app/package-lock.json` and `infra/.terraform.lock.hcl`. Packaging includes only four explicitly named app files; it cannot pick up `.env`, cloud credentials, or local results. The bundle size check reserves space within EC2's user-data limit.
+The application and provider versions are locked in `app/package-lock.json` and `infra/.terraform.lock.hcl`. Packaging includes only five explicitly named app files; it cannot pick up `.env`, cloud credentials, or local results. The bundle size check reserves space within EC2's user-data limit. To additionally test database grants against an isolated local PostgreSQL server, install its `initdb`/`pg_ctl` tools and run `RUN_LOCAL_POSTGRES_TESTS=1 make test`; this starts a temporary server using a Unix socket with TCP disabled.
 
-### Later: provision and deploy
+### Provision and deploy
 
-These steps create billable resources and consume one doxx seat. They have **not** been run for this checkout.
+These steps create billable resources and consume one doxx seat. Deployment and online verification have been completed for this checkout; a full teardown/rebuild cycle remains pending.
 
 ```sh
 cp .env.example .env
 chmod 600 .env
 cp infra/terraform.tfvars.example infra/terraform.tfvars
-# Edit .env with your net-admin token, server and existing Mac tunnel name.
+# Edit .env with your temporary net-admin token, server and existing Mac tunnel name.
 make servers
 make tunnels
 make check
@@ -110,7 +116,9 @@ flowchart LR
   X --> B[Later: rebuild from README]
 ```
 
-Provisioning records ownership in `.local/provision.json` with mode 0600. Repeated runs reuse the named tunnel and owned SSM parameter, skip existing firewall rules, and preserve account-wide settings. A pre-existing tunnel is borrowed, not deleted at teardown. Duplicate names, changed account/region, or an unowned SSM parameter cause an error. Keep the private journal until cleanup is finished. A crash between an API mutation and its journal update can leave an untracked resource: inspect it manually; never delete it merely because its name matches.
+Provisioning records ownership in `.local/provision.json` with mode 0600. Repeated runs reuse the named tunnel and owned SSM parameter, skip active existing firewall rules, and preserve account-wide settings. A pre-existing tunnel is borrowed, not deleted at teardown. Duplicate names, changed account/region, or an unowned SSM parameter cause an error. Keep the private journal until cleanup is finished. A crash between an API mutation and its journal update can leave an untracked resource: inspect it manually; never delete it merely because its name matches.
+
+The WireGuard endpoint's IPv4 address is resolved during provisioning and pinned in both the private WireGuard config and Terraform inputs. Egress permits UDP only to that address and endpoint port, TCP 5432 only to the DB security group, and TCP 443 for AWS APIs, package downloads and the RDS CA. If the doxx endpoint address changes or becomes unavailable, rerun provisioning and deployment to refresh it.
 
 <details>
 <summary>Configuration reference</summary>
@@ -119,7 +127,7 @@ Environment values are read by Node's env-file loader; `.env` is not executed as
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DOXX_TOKEN` | required | net-admin credential, never sent to AWS |
+| `DOXX_TOKEN` | required | Temporary scoped net-admin credential for changes; read-only for verification; never sent to AWS |
 | `AWS_REGION` | `us-east-1` | AWS deployment region |
 | `DOXX_TUNNEL_NAME` | `aws-test-app` | Dedicated instance tunnel name |
 | `DOXX_SERVER` | required | Exact discovered server hostname |
@@ -129,20 +137,23 @@ Environment values are read by Node's env-file loader; `.env` is not executed as
 | `WG_MTU` | `1380` | Conservative starting MTU, live validation still needed |
 | `DIRECT_BASELINE_CONFIRMED` | unset | Set `1` only after verifying the regional baseline bypasses the Mac's doxx tunnel |
 | `project_name` (Terraform) | `doxx-test-app` | Resource names and tags |
-| `postgres_version` (Terraform) | `17.6` | Pinned engine; check regional availability before apply |
+| `postgres_version` (Terraform) | `17` | PostgreSQL major version; automatic minor upgrades enabled |
 | `ami_id` (Terraform) | `null` | Latest AL2023 x86_64; replace with recorded output to reproduce exactly |
 | `aws_region`, `wg_parameter_name` (Terraform) | above | Written by provisioning |
 | `tunnel_ip`, `client_ip` (Terraform) | required | Written by provisioning; no private keys |
+| `tunnel_endpoint_ips`, `tunnel_endpoint_port` (Terraform) | required | Resolved endpoint and UDP port written by provisioning |
 
 `infra/generated.auto.tfvars.json` is private and overrides matching values in `terraform.tfvars`. Change region, parameter, or Mac selection through `.env`, not by editing the generated file. Default AWS credential resolution is used; standard `AWS_PROFILE` is supported if intentionally set.
 
-Runtime environment values are `BIND_HOST`, `CLIENT_IP`, `AWS_REGION`, `DB_HOST`, `DB_SECRET_ARN`, and `DB_CA_FILE`. They contain references and addresses, not passwords. The app fetches its password directly into memory. No sensitive SSM value is read by Terraform.
+The environment file contains `BIND_HOST`, `CLIENT_IP`, `AWS_REGION`, `DB_HOST`, `DB_SECRET_ARN`, `DB_CREDENTIALS_FILE`, and `DB_CA_FILE`. These are references and addresses. Root startup code fetches the managed master password, initializes the table, and sets a random password for the `notes_app` role. That role receives only SELECT/INSERT/DELETE on `notes`, sequence access, and connection/schema usage. Its credentials are written to a root-owned 0640 file under `/run/doxx-app`, readable by the `notes` group. The app reads this file and does not call AWS. Root installs an iptables owner rule before every service start to block IMDS access for the `notes` UID; IPv6 IMDS is disabled. No sensitive SSM value is read by Terraform.
+
+PostgreSQL stays within major version 17 by default. RDS applies its designated automatic minor upgrade during the maintenance window; this does not guarantee every newly published minor release is selected immediately. See the [RDS automatic upgrade policy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_UpgradeDBInstance.PostgreSQL.Minor.html).
 
 </details>
 
 ## Verify
 
-`make verify` checks the app security group, DB security group, private RDS flag, connected instance tunnel, page access, reported caller IP, notes persistence across a service restart, and blocked public TCP 8080. It removes its own test note. It requires permission to send SSM commands and leaves other notes intact.
+`make verify` checks the app security group, DB security group, private RDS flag, connected instance tunnel, disabled Link All, active Mac-to-app rule, page access, reported caller IP, notes persistence across a service restart, and blocked public TCP 8080. Through SSM it checks the IMDS owner rule and confirms root can request an IMDSv2 token while `notes` cannot reach IMDS; token output is discarded. It removes its own test note. It requires permission to send SSM commands and leaves other notes intact.
 
 Then disconnect the Mac tunnel, run `make verify-offline`, and reconnect it. A failed connection on its own is not evidence of isolation; combine it with the successful connected test and security group inspection. Automatic tunnel switching is deliberately not performed.
 
@@ -150,15 +161,17 @@ For a manual note test, open the page and submit its form. Raw POSTs require the
 
 | Test | Local status / live purpose |
 |---|---|
-| App security tests | Local: escaping, parameterized writes, body bounds, CSRF, caller-IP checks, sanitized errors |
+| App security tests | Local: escaping, parameterized writes, body bounds, CSRF, caller-IP and fixed Host/Origin checks, sanitized errors |
 | AWS CLI input tests | Local skeleton validation: private-file input and cleanup on success/failure; no AWS requests |
-| Provisioning lifecycle tests | Local mocks: idempotency, owned cleanup, preservation of borrowed resources |
-| Terraform plan test | Mock provider: zero ingress, private encrypted RDS, IMDSv2; no AWS calls |
+| Provisioning lifecycle tests | Local mocks: idempotency, owned cleanup, borrowed resources, Link All refusal, owned parked rule repair, unowned parked rule refusal |
+| Terraform plan test | Mock provider: zero ingress, scoped egress, private encrypted RDS, automatic minor upgrades, IMDSv2; no AWS calls |
+| Database privilege test | Optional isolated local PostgreSQL: CRUD permissions, denied schema/admin changes, idempotent initialization |
+| Secret scanner test | Local: baseline is scanned and secret values are suppressed |
 | Config renderer tests | Local: valid split routes, rejection of injected WireGuard fields |
 | Percentile/report tests | Local: known percentiles, light/dark SVG and table generation |
-| `make verify` | Not yet run against AWS |
+| `make verify` | Passed against AWS on 2026-10-14, including DB writes, persistence across restart, and IMDS isolation |
 | `make verify-offline` | Not yet run; requires manual Mac disconnect |
-| Boot/rebuild | Not yet validated on EC2 |
+| Boot/rebuild | Running EC2 verified after startup repairs; a clean rebuild with the corrected source remains pending |
 
 ## Latency
 
@@ -237,7 +250,7 @@ Use a net-admin token for mutations. References: [authentication](https://github
 | Runtime secret fetch | Secrets embedded in Terraform/user data | Keeps key material and passwords out of state and source |
 | Split tunnel | Full tunnel on EC2 | Preserves metadata, VPC DNS and AWS API access |
 | Dedicated per-pair rule | Change Link All | Preserves existing account configuration |
-| App source-IP check | Rely only on doxx firewall | Restricts caller even when Link All is already enabled |
+| App source-IP and fixed Host/Origin checks | Rely only on doxx firewall | Restricts the peer and blocks browser DNS rebinding |
 | Small explicit app archive | Git clone at boot | Reproducible source without GitHub credentials on EC2 |
 
 <details>
@@ -246,8 +259,8 @@ Use a net-admin token for mutations. References: [authentication](https://github
 - `.env`, `.local`, generated WireGuard configs, Terraform variables/state/plans and raw results are ignored. Keep state and the ownership journal private even though secret values are kept out of Terraform.
 - AWS IAM allows the required WireGuard parameter and managed DB secret reads. The standard SSM managed policy is attached for administration; it has AWS-defined permissions beyond these two custom statements. This is a disposable single-instance demo, not a complete production least-privilege design.
 - No inbound SSH, public HTTP rule, ALB, NAT gateway or public database. The instance's public IPv4 is for outbound connectivity.
-- App code runs as an unprivileged user. AWS role credentials are supplied by IMDSv2. DB credentials are fetched at startup; after managed password rotation, restart the service to refresh them.
-- Public output should include source, lockfiles, example inputs, and sanitized measurement data only. Review any generated baseline before committing. Run `make security-check` before publication.
+- App code runs as `notes` with no capabilities and no IMDS access. Root startup code uses the instance role and managed master secret, then supplies only the scoped app credential. Service restarts rotate that credential; notes remain in the database.
+- Public output should include source, lockfiles, example inputs, and sanitized measurement data only. Review any generated baseline before committing. Run `make security-check` before publication; it includes `results/baseline.json` and other generated results.
 - Login and independent HTTPS are deferred. Do not use real personal information or sensitive notes in this stage. The DB is intentionally deleted without a final snapshot.
 
 </details>
@@ -260,12 +273,17 @@ Use a net-admin token for mutations. References: [authentication](https://github
 | Tunnel name rejected | `make tunnels`; names must be unique and Mac/app tunnels distinct |
 | AWS SSM write denied | The sanitized error identifies IAM/credential failures; check `ssm:PutParameter`, tagging permissions and any applicable KMS policy |
 | Existing SSM parameter rejected | Use a unique parameter path; do not overwrite unrelated secrets |
+| Link All rejected | Disable Link All in doxx before provisioning and leave it disabled while the instance runs |
+| Matching firewall rule disabled | Enable or remove the parked rule in doxx, then rerun provisioning |
 | Instance unavailable | Wait for RDS and cloud-init, then use `aws ssm start-session --target <instance-id>` |
 | Tunnel down | Privately inspect `sudo wg show` and `journalctl -u wg-quick@doxx`; never publish config output |
 | Service unavailable | `journalctl -u doxx-app`; check DB connectivity, CA and secret permissions |
-| 403 from app | Mac tunnel changed, source address differs, or CSRF token is stale after restart (reload the page). Form POSTs must be same-origin: the app sends `Referrer-Policy: same-origin` because `no-referrer` makes browsers send `Origin: null`, which the app rejects |
+| Connection times out while service is running | Reconnect the configured Mac tunnel. With the dxx CLI, use `dxx connect --name <configured-Mac-tunnel-name>`. On macOS, `route -n get <app-tunnel-ip>` should select the active tunnel interface; an `en0`/Wi-Fi route means the request is bypassing doxx |
+| Startup cannot find iptables | The service PATH must include `/usr/sbin` and `/sbin`; the template includes them |
+| Bootstrap fails with 42501 | RDS administrators cannot reset superuser/replication flags. Bootstrap checks the app role's default flags and changes only its login password |
+| 403 from app | Use exactly `http://<tunnel-ip>:8080`; foreign or missing Host headers are rejected. Check Mac source IP and reload after a service restart to refresh CSRF. Form Origins must match the fixed app URL |
 | Large responses stall | Revisit MTU and routes; 1380 is provisional |
-| RDS version unavailable | Select a supported exact version in `terraform.tfvars`, document the change |
+| RDS version unavailable | Select a supported major version in `terraform.tfvars`, document the change |
 | Boot package install fails | Check pinned AMI and AL2023 nodejs22 package availability |
 | Cleanup interrupted | Retain local state/journal, inspect owned resources, then rerun cleanup |
 

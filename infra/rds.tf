@@ -2,13 +2,14 @@ resource "aws_security_group" "db" {
   name_prefix = "${var.project_name}-db-"
   description = "Postgres from app security group only"
   vpc_id      = data.aws_vpc.default.id
-  ingress {
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
-  }
-  egress = []
+}
+resource "aws_security_group_rule" "db_from_app" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.db.id
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.app.id
 }
 resource "aws_db_subnet_group" "notes" {
   name_prefix = "${var.project_name}-"
@@ -18,7 +19,7 @@ resource "aws_db_instance" "notes" {
   identifier_prefix           = "${var.project_name}-"
   engine                      = "postgres"
   engine_version              = var.postgres_version
-  auto_minor_version_upgrade  = false
+  auto_minor_version_upgrade  = true
   instance_class              = "db.t4g.micro"
   allocated_storage           = 20
   storage_type                = "gp3"

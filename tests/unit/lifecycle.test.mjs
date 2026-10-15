@@ -18,9 +18,9 @@ export function doxx(action, p) {
   if (action === 'servers') response = { servers: [{ server_name: 'wireguard.example.com' }] };
   else if (action === 'list_tunnels') response = { tunnels: s.tunnels };
   else if (action === 'create_tunnel') { if (p.type !== 'wireguard') throw new Error('Explicit WireGuard type required'); s.tunnels.push({ name: p.name, server: p.server, tunnel_token: 'fixture-app', assigned_ip: '10.1.0.2/31' }); }
-  else if (action === 'wireguard') response = { config: { interface: { private_key: 'A'.repeat(43) + '=', address: '10.1.0.2/31' }, peer: { public_key: 'B'.repeat(43) + '=', endpoint: 'wireguard.example.com:51820' } } };
-  else if (action === 'firewall_rule_list') response = { rules: s.rules, link_all_enabled: false };
-  else if (action === 'firewall_rule_add') { const {token, firewall_rule_add, ...rule} = p; s.rules.push(rule); }
+  else if (action === 'wireguard') response = { config: { interface: { private_key: 'A'.repeat(43) + '=', address: '10.1.0.2/31' }, peer: { public_key: 'B'.repeat(43) + '=', endpoint: '198.51.100.8:51820' } } };
+  else if (action === 'firewall_rule_list') response = { rules: s.rules.map(rule => ({ ...rule, dst_ip: rule.dst_ip.includes('/') ? rule.dst_ip : rule.dst_ip + '/32' })), link_all_enabled: s.linkAll || false };
+  else if (action === 'firewall_rule_add') { const {token, firewall_rule_add, ...rule} = p; s.rules.push({ ...rule, enabled: 1 }); }
   else if (action === 'firewall_rule_delete') s.rules = s.rules.filter(r => r.src_ip !== p.src_ip);
   else if (action === 'delete_tunnel') s.tunnels = s.tunnels.filter(t => t.tunnel_token !== p.tunnel_token);
   else throw new Error('Unexpected mock API action');
@@ -61,6 +61,10 @@ test('provisioning is idempotent and teardown deletes only owned resources', asy
     assert.equal(s.calls.filter(x => x === 'create_tunnel').length, 1);
     assert.equal(s.calls.filter(x => x === 'firewall_rule_add').length, 1);
     assert.equal(s.parameter.Overwrite, true);
+    const inputs = JSON.parse(await readFile(join(f.dir, 'infra/generated.auto.tfvars.json'), 'utf8'));
+    assert.deepEqual(inputs.tunnel_endpoint_ips, ['198.51.100.8']);
+    assert.equal(inputs.tunnel_endpoint_port, 51820);
+    assert.match(s.parameter.Value, /Endpoint = 198\.51\.100\.8:51820/);
     await f.execute('teardown'); s = await f.state();
     assert.equal(s.tunnels.length, 1); assert.equal(s.tunnels[0].name, 'Mac');
     assert.equal(s.rules.length, 0); assert.equal(s.parameter, null);
@@ -76,5 +80,44 @@ test('provisioning refuses an existing unowned SSM parameter', async () => {
   try {
     await assert.rejects(f.execute('provision'), error => /Refusing to overwrite/.test(error.stderr));
     assert.deepEqual((await f.state()).parameter, { Tags: [] });
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+test('Link All is refused before any provisioning mutation', async () => {
+  const f = await setup();
+  try {
+    await writeFile(join(f.dir, 'state.json'), JSON.stringify({ ...await f.state(), linkAll: true }));
+    await assert.rejects(f.execute('provision'), error => /Link All must be disabled/.test(error.stderr));
+    const state = await f.state();
+    assert.equal(state.tunnels.length, 1);
+    assert.equal(state.parameter, null);
+    assert.ok(!state.calls.includes('create_tunnel'));
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+test('a parked matching rule stops provisioning without replacing unowned resources', async () => {
+  const f = await setup(true);
+  try {
+    const rules = [{ tunnel_token: 'fixture-app', protocol: 'TCP', src_ip: '10.1.0.4/32', src_port: 'ALL', dst_ip: '10.1.0.2', dst_port: '8080', enabled: 0 }];
+    await writeFile(join(f.dir, 'state.json'), JSON.stringify({ ...await f.state(), rules }));
+    await assert.rejects(f.execute('provision'), error => /firewall rule is disabled/.test(error.stderr));
+    const state = await f.state();
+    assert.deepEqual(state.rules, rules);
+    assert.equal(state.parameter, null);
+    assert.ok(!state.calls.includes('firewall_rule_add'));
+    assert.ok(!state.calls.includes('firewall_rule_delete'));
+  } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+test('a parked project-owned rule is recreated as active', async () => {
+  const f = await setup();
+  try {
+    await f.execute('provision');
+    const state = await f.state();
+    await writeFile(join(f.dir, 'state.json'), JSON.stringify({ ...state, rules: state.rules.map(rule => ({ ...rule, enabled: 0 })) }));
+    await f.execute('provision');
+    const repaired = await f.state();
+    assert.equal(repaired.rules.length, 1);
+    assert.equal(repaired.rules[0].enabled, 1);
+    assert.equal(repaired.calls.filter(action => action === 'firewall_rule_delete').length, 1);
+    assert.equal(repaired.calls.filter(action => action === 'firewall_rule_add').length, 2);
+    assert.equal(JSON.parse(await readFile(join(f.dir, '.local/provision.json'), 'utf8')).rules.length, 1);
   } finally { await rm(f.dir, { recursive: true, force: true }); }
 });

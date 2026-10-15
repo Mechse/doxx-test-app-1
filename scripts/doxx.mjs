@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir, rename, unlink, mkdtemp, rm } from 'node:fs
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { isIPv4, isIP } from 'node:net';
+import { lookup } from 'node:dns/promises';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 const statePath = '.local/provision.json';
@@ -110,7 +111,7 @@ export function renderWireguard(config, allowed, mtu) {
     if (!isIP(ip) || !/^\d+$/.test(prefix || '') || +prefix > (isIP(ip) === 4 ? 32 : 128)) throw new Error('Invalid split-tunnel CIDR');
     if (isIP(ip) === 4 ? (!ip.startsWith('10.') || +prefix < 8) : (!ip.toLowerCase().startsWith('2602:f5c1:1:') || +prefix < 48)) throw new Error('Routes must stay within documented doxx ranges');
   }
-  if (!/^[a-zA-Z0-9.-]+:\d{1,5}$/.test(peer.endpoint || '') || !Number.isInteger(+mtu) || +mtu < 1280 || +mtu > 1420) throw new Error('Invalid endpoint or MTU');
+  if (!/^[a-zA-Z0-9.-]+:\d{1,5}$/.test(peer.endpoint || '') || +peer.endpoint.split(':')[1] < 1 || +peer.endpoint.split(':')[1] > 65535 || !Number.isInteger(+mtu) || +mtu < 1280 || +mtu > 1420) throw new Error('Invalid endpoint or MTU');
   return `[Interface]\nPrivateKey = ${iface.private_key}\nAddress = ${addresses.join(', ')}\nMTU = ${mtu}\n\n[Peer]\nPublicKey = ${peer.public_key}\nEndpoint = ${peer.endpoint}\nAllowedIPs = ${ranges.join(', ')}\nPersistentKeepalive = 25\n`;
 }
 async function save(state) {
@@ -125,6 +126,15 @@ const one = (tunnels, name) => {
   const matches = tunnels.filter((t) => t.name === name);
   if (matches.length > 1) throw new Error(`Multiple tunnels match ${name}; choose a unique name`);
   return matches[0];
+};
+export const matchesRule = (rule, desired) => Object.entries(desired).every(([key, value]) => {
+  const normalize = (input) => ['src_ip', 'dst_ip'].includes(key) ? String(input).replace(/\/32$/, '') : String(input);
+  return normalize(rule[key]) === normalize(value);
+});
+// Older API responses omit enabled; explicitly parked rules must never count as active.
+export const ruleEnabled = (rule) => rule.enabled === undefined || [true, 1, '1'].includes(rule.enabled);
+const requireLinkAllOff = (rules) => {
+  if (![false, 0, '0'].includes(rules.link_all_enabled)) throw new Error('Link All must be disabled before provisioning: it lets the EC2 tunnel reach every device on the account. Disable it in doxx and rerun provisioning.');
 };
 async function provision() {
   const env = process.env;
@@ -144,6 +154,14 @@ async function provision() {
   const clientIp = ipv4(mac.assigned_ip);
   let tunnel = one(tunnels, name);
   if (tunnel && tunnel.server !== env.DOXX_SERVER) throw new Error('Existing app tunnel uses another server; refusing to migrate it');
+  // Check account-wide mesh access before creating or changing any resources.
+  const rules = await api('firewall_rule_list');
+  requireLinkAllOff(rules);
+  const desiredFor = (peer) => ({ tunnel_token: peer.tunnel_token, protocol: 'TCP', src_ip: `${clientIp}/32`, src_port: 'ALL', dst_ip: ipv4(peer.assigned_ip), dst_port: '8080' });
+  if (tunnel) {
+    const matching = (rules.rules || []).filter((rule) => matchesRule(rule, desiredFor(tunnel)));
+    if (matching.length && !matching.some(ruleEnabled) && !state?.rules.some((rule) => matchesRule(rule, desiredFor(tunnel)))) throw new Error('The matching TCP 8080 firewall rule is disabled. Enable or remove it in doxx before rerunning provisioning; this project will not replace an unowned parked rule.');
+  }
   if (!state) {
     state = { owner: randomUUID(), account, region, name, parameter, tunnelOwned: false, parameterOwned: false, rules: [] };
     await save(state);
@@ -161,7 +179,14 @@ async function provision() {
   await save(state);
   const wg = await api('wireguard', { tunnel_token: tunnel.tunnel_token });
   if (ipv4(wg.config?.interface?.address?.split(',')[0]) !== state.tunnelIp) throw new Error('WireGuard address differs from tunnel address');
-  const value = renderWireguard(wg.config, env.DOXX_ALLOWED_IPS || '10.0.0.0/8,2602:f5c1:1::/48', env.WG_MTU || '1380');
+  const allowed = env.DOXX_ALLOWED_IPS || '10.0.0.0/8,2602:f5c1:1::/48';
+  const mtu = env.WG_MTU || '1380';
+  renderWireguard(wg.config, allowed, mtu); // Validate before parsing or resolving the endpoint.
+  const [endpointHost, endpointPort] = wg.config.peer.endpoint.split(':');
+  const endpointIp = isIPv4(endpointHost) ? endpointHost : (await lookup(endpointHost, { family: 4 })).address;
+  // Pin the same address in WireGuard and the security group to avoid DNS differences at boot.
+  const pinnedConfig = { ...wg.config, peer: { ...wg.config.peer, endpoint: `${endpointIp}:${endpointPort}` } };
+  const value = renderWireguard(pinnedConfig, allowed, mtu);
   const existing = await aws(['ssm', 'describe-parameters', '--parameter-filters', `Key=Name,Option=Equals,Values=${parameter}`]);
   if (existing.Parameters.length) {
     const tags = await aws(['ssm', 'list-tags-for-resource', '--resource-type', 'Parameter', '--resource-id', parameter]);
@@ -170,9 +195,17 @@ async function provision() {
   await aws(['ssm', 'put-parameter'], { Name: parameter, Type: 'SecureString', Value: value, ...(existing.Parameters.length ? { Overwrite: true } : { Tags: [{ Key: 'doxx-test-owner', Value: state.owner }] }) });
   state.parameterOwned = true;
   await save(state);
-  const rules = await api('firewall_rule_list', { tunnel_token: tunnel.tunnel_token });
-  const desired = { tunnel_token: tunnel.tunnel_token, protocol: 'TCP', src_ip: `${clientIp}/32`, src_port: 'ALL', dst_ip: state.tunnelIp, dst_port: '8080' };
-  if (!rules.link_all_enabled && !(rules.rules || []).some((r) => Object.entries(desired).every(([k, v]) => String(r[k]) === v))) {
+  const currentRules = await api('firewall_rule_list', { tunnel_token: tunnel.tunnel_token });
+  requireLinkAllOff(currentRules);
+  const desired = desiredFor(tunnel);
+  const matching = (currentRules.rules || []).filter((rule) => matchesRule(rule, desired));
+  if (matching.length && !matching.some(ruleEnabled)) {
+    if (!state.rules.some((rule) => matchesRule(rule, desired))) throw new Error('The matching TCP 8080 firewall rule is disabled. Enable or remove it in doxx before rerunning provisioning.');
+    await api('firewall_rule_delete', desired);
+    state.rules = state.rules.filter((rule) => !matchesRule(rule, desired));
+    await save(state);
+  }
+  if (!matching.some(ruleEnabled)) {
     await api('firewall_rule_add', desired);
     state.rules.push(desired);
     await save(state);
@@ -187,7 +220,7 @@ async function provision() {
   }
   state.clientIp = clientIp;
   await save(state);
-  await writeFile('infra/generated.auto.tfvars.json', JSON.stringify({ tunnel_ip: state.tunnelIp, client_ip: clientIp, aws_region: region, wg_parameter_name: parameter }, null, 2), { mode: 0o600 });
+  await writeFile('infra/generated.auto.tfvars.json', JSON.stringify({ tunnel_ip: state.tunnelIp, client_ip: clientIp, aws_region: region, wg_parameter_name: parameter, tunnel_endpoint_ips: [endpointIp], tunnel_endpoint_port: +endpointPort }, null, 2), { mode: 0o600 });
   console.log('Provisioning complete. Private deployment inputs written; run make deploy next.');
 }
 async function teardown() {
@@ -199,7 +232,7 @@ async function teardown() {
   if (tunnel) {
     const current = await api('firewall_rule_list', { tunnel_token: state.tunnelToken });
     for (const rule of [...state.rules]) {
-      if (current.rules.some((r) => Object.entries(rule).every(([k, v]) => String(r[k]) === v))) await api('firewall_rule_delete', rule);
+      if (current.rules.some((r) => matchesRule(r, rule))) await api('firewall_rule_delete', rule);
       state.rules = state.rules.filter((r) => r !== rule);
       await save(state);
     }

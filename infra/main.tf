@@ -19,10 +19,22 @@ resource "aws_security_group" "app" {
   vpc_id      = data.aws_vpc.default.id
   ingress     = []
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = var.tunnel_endpoint_port
+    to_port     = var.tunnel_endpoint_port
+    protocol    = "udp"
+    cidr_blocks = [for ip in var.tunnel_endpoint_ips : "${ip}/32"]
+  }
+  egress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.db.id]
   }
 }
 resource "aws_iam_role" "app" {
@@ -61,6 +73,7 @@ resource "aws_instance" "app" {
   metadata_options {
     http_tokens                 = "required"
     http_put_response_hop_limit = 1
+    http_protocol_ipv6          = "disabled"
   }
   root_block_device {
     volume_size           = 8
@@ -79,6 +92,6 @@ resource "aws_instance" "app" {
       error_message = "RDS requires subnets in at least two availability zones."
     }
   }
-  depends_on = [aws_iam_role_policy.secrets, aws_iam_role_policy_attachment.ssm]
+  depends_on = [aws_iam_role_policy.secrets, aws_iam_role_policy_attachment.ssm, aws_security_group_rule.db_from_app]
   tags       = { Name = var.project_name }
 }

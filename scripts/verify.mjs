@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { api, aws } from './doxx.mjs';
+import { api, aws, ruleEnabled, matchesRule } from './doxx.mjs';
 const out = JSON.parse(execFileSync('terraform', ['-chdir=infra', 'output', '-json'], { encoding: 'utf8' }));
 const value = (key) => out[key].value;
 process.env.AWS_REGION = value('aws_region');
@@ -31,6 +31,10 @@ if (process.argv.includes('--offline')) {
   const state = JSON.parse(await readFile('.local/provision.json', 'utf8'));
   const tunnel = (await api('list_tunnels')).tunnels.find((t) => t.tunnel_token === state.tunnelToken);
   assert.equal(tunnel?.is_connected, true, 'App tunnel must be connected');
+  const firewall = await api('firewall_rule_list', { tunnel_token: state.tunnelToken });
+  assert.ok([false, 0, '0'].includes(firewall.link_all_enabled), 'Link All must remain disabled while this instance runs');
+  const desired = { tunnel_token: state.tunnelToken, protocol: 'TCP', src_ip: `${value('client_ip')}/32`, src_port: 'ALL', dst_ip: value('tunnel_ip'), dst_port: '8080' };
+  assert.ok(firewall.rules.some(rule => ruleEnabled(rule) && matchesRule(rule, desired)), 'The Mac-to-app rule must be active');
   const health = await request('/healthz'); assert.equal(health.status, 200);
   const page = await request('/'); assert.equal(page.status, 200);
   const html = await page.text();
@@ -41,7 +45,9 @@ if (process.argv.includes('--offline')) {
   assert.equal(post.status, 303);
   const id = post.headers.get('x-note-id'); assert.match(id, /^\d+$/);
   try {
-    const command = await aws(['ssm', 'send-command', '--document-name', 'AWS-RunShellScript', '--instance-ids', value('instance_id'), '--parameters', JSON.stringify({ commands: ['systemctl restart doxx-app.service'] })]);
+    const metadataProbe = "curl --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 3 --request PUT --header 'X-aws-ec2-metadata-token-ttl-seconds: 60' --output /dev/null http://169.254.169.254/latest/api/token";
+    const commands = ['set -e', 'iptables -C OUTPUT -d 169.254.169.254/32 -m owner --uid-owner notes -j REJECT', `${metadataProbe} --fail`, `if runuser -u notes -- ${metadataProbe} 2>/dev/null; then echo 'notes can reach IMDS'; exit 1; fi`, 'systemctl restart doxx-app.service'];
+    const command = await aws(['ssm', 'send-command', '--document-name', 'AWS-RunShellScript', '--instance-ids', value('instance_id'), '--parameters', JSON.stringify({ commands })]);
     let succeeded = false;
     for (let attempt = 0; attempt < 30; attempt++) {
       await sleep(2000);

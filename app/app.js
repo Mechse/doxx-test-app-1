@@ -11,6 +11,8 @@ export function createApp({ pool, bindHost, clientIp, remoteAddress = (c) => get
   const app = new Hono();
   // A process-scoped form token protects this single-client, pre-login demo from CSRF.
   const csrf = randomBytes(32).toString('hex');
+  const expectedHost = `${bindHost}:8080`;
+  const expectedOrigin = `http://${expectedHost}`;
   app.use('*', async (c, next) => {
     const start = performance.now();
     c.set('dbMs', 0);
@@ -23,6 +25,7 @@ export function createApp({ pool, bindHost, clientIp, remoteAddress = (c) => get
       c.header('Server-Timing', `app;dur=${(performance.now() - start).toFixed(3)}, db;dur=0`);
       return c.text('Forbidden', 403);
     }
+    if (c.req.header('host') !== expectedHost) return c.text('Forbidden', 403);
     await next();
     const db = c.get('dbMs');
     c.header('Server-Timing', `app;dur=${Math.max(0, performance.now() - start - db).toFixed(3)}, db;dur=${db.toFixed(3)}`);
@@ -46,7 +49,7 @@ export function createApp({ pool, bindHost, clientIp, remoteAddress = (c) => get
   });
   async function validateForm(c) {
     const origin = c.req.header('origin');
-    if (origin && origin !== new URL(c.req.url).origin) return c.text('Forbidden', 403);
+    if (origin && origin !== expectedOrigin) return c.text('Forbidden', 403);
     if (!c.req.header('content-type')?.startsWith('application/x-www-form-urlencoded')) return c.text('Unsupported content type', 415);
     const form = new URLSearchParams(await c.req.text());
     const supplied = Buffer.from(form.get('csrf') || '');

@@ -1,5 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises';
-const skip = new Set(['.git', '.terraform', '.local', 'node_modules', 'results']);
+const skip = new Set(['.git', '.terraform', '.local', 'node_modules']);
 const candidates = [];
 async function walk(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {

@@ -1,6 +1,6 @@
 # Tunnel/client IP, region and parameter are written by make provision to an
 # ignored generated.auto.tfvars.json file. Do not put secrets in Terraform.
 project_name     = "doxx-test-app"
-postgres_version = "17.6"
+postgres_version = "17"
 # Pin after the first deployment for exact AMI reproduction:
 # ami_id = "ami-replace-with-recorded-id"

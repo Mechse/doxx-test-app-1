@@ -28,6 +28,20 @@ variable "client_ip" {
     error_message = "Set the selected Mac's doxx 10.x IPv4 address."
   }
 }
+variable "tunnel_endpoint_ips" {
+  type = list(string)
+  validation {
+    condition     = length(var.tunnel_endpoint_ips) > 0 && alltrue([for ip in var.tunnel_endpoint_ips : can(cidrnetmask("${ip}/32"))])
+    error_message = "Set at least one resolved IPv4 doxx WireGuard endpoint address."
+  }
+}
+variable "tunnel_endpoint_port" {
+  type = number
+  validation {
+    condition     = var.tunnel_endpoint_port >= 1 && var.tunnel_endpoint_port <= 65535
+    error_message = "Set a valid UDP port for the WireGuard endpoint."
+  }
+}
 variable "wg_parameter_name" {
   type    = string
   default = "/doxx-test-app/wg-conf"
@@ -46,5 +60,5 @@ variable "ami_id" {
 }
 variable "postgres_version" {
   type    = string
-  default = "17.6"
+  default = "17"
 }
